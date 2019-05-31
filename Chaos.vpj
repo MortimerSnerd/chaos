@@ -1,0 +1,96 @@
+<!DOCTYPE Project SYSTEM "http://www.slickedit.com/dtd/vse/10.0/vpj.dtd">
+<Project
+	Version="10.0"
+	VendorName="SlickEdit"
+	TemplateName="(Other)"
+	WorkingDir=".">
+	<Config
+		Name="Release"
+		OutputFile=""
+		CompilerConfigName="">
+		<Menu>
+			<Target
+				Name="Compile"
+				MenuCaption="&amp;Compile"
+				CaptureOutputWith="ProcessBuffer"
+				SaveOption="SaveCurrent"
+				RunFromDir="%rw"
+				ClearProcessBuffer="1">
+				<Exec CmdLine="nim cpp %f"/>
+			</Target>
+			<Target
+				Name="Build"
+				MenuCaption="&amp;Build"
+				CaptureOutputWith="ProcessBuffer"
+				SaveOption="SaveWorkspaceFiles"
+				RunFromDir="%rw"
+				ClearProcessBuffer="1">
+				<Exec CmdLine="nim build"/>
+			</Target>
+			<Target
+				Name="Rebuild"
+				MenuCaption="&amp;Rebuild"
+				CaptureOutputWith="ProcessBuffer"
+				SaveOption="SaveWorkspaceFiles"
+				RunFromDir="%rw">
+				<Exec/>
+			</Target>
+			<Target
+				Name="Debug"
+				MenuCaption="&amp;Debug"
+				SaveOption="SaveNone"
+				RunFromDir="%rw">
+				<Exec/>
+			</Target>
+			<Target
+				Name="Execute"
+				MenuCaption="E&amp;xecute"
+				SaveOption="SaveNone"
+				RunFromDir="%rw"
+				CaptureOutputWith="ProcessBuffer"
+				ClearProcessBuffer="1">
+				<Exec CmdLine="testy.exe"/>
+			</Target>
+			<Target
+				Name="Build Docs"
+				MenuCaption="Build Docs"
+				RunFromDir="%rw"
+				CaptureOutputWith="ProcessBuffer"
+				SaveOption="SaveNone">
+				<Exec CmdLine="nim makeDocs"/>
+			</Target>
+		</Menu>
+	</Config>
+	<CustomFolders>
+		<Folder
+			Name="Source Files"
+			Filters="*.c;*.C;*.cc;*.cpp;*.cp;*.cxx;*.c++;*.prg;*.pas;*.dpr;*.asm;*.s;*.bas;*.java;*.cs;*.sc;*.scala;*.e;*.cob;*.html;*.rc;*.tcl;*.py;*.pl;*.d;*.m;*.mm;*.go;*.groovy;*.gsh"
+			GUID="{46DE8D65-5438-498D-8A7C-DE65BF4B41A0}"/>
+		<Folder
+			Name="Header Files"
+			Filters="*.h;*.H;*.hh;*.hpp;*.hxx;*.h++;*.inc;*.sh;*.cpy;*.if"
+			GUID="{87728BDE-636F-411A-91ED-142BC8A03491}"/>
+		<Folder
+			Name="Resource Files"
+			Filters="*.ico;*.cur;*.dlg"
+			GUID="{40E0FB10-88F1-42C7-86E9-27F32D2D418B}"/>
+		<Folder
+			Name="Bitmaps"
+			Filters="*.bmp"
+			GUID="{E20EA1DF-D9E3-4579-A16F-A98878B373B7}"/>
+		<Folder
+			Name="Other Files"
+			Filters=""
+			GUID="{4E75629A-0912-49F8-D874-586F60EA3C8F}"></Folder>
+	</CustomFolders>
+	<Files AutoFolders="DirectoryView">
+		<F
+			N="*.nim"
+			Recurse="1"
+			Excludes="config/"/>
+		<F
+			N="*.nims"
+			Recurse="1"
+			Excludes="config/"/>
+	</Files>
+</Project>
