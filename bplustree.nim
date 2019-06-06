@@ -1,7 +1,7 @@
 #
 # Generic B+ Tree.  
 import
-  strformat
+  macros, strformat
 
 type
   BlockMgr*[Bn] = ref object
@@ -20,11 +20,42 @@ type
       ## Frees a block. Once a block is freed, it can be immediately reused.
     load*: proc (blk: Bn) : pointer
       ## Loads the block into memory (if necessary), and returns the pointer for it.
+    finished*: proc (blk: Bn)
+      ## Should be called the caller is finished using a pointer returned by `load`.
     destroy*: proc ()
       ## Called to destroy all memory held by the block manager.
     modified*: proc (blk: Bn) 
-      ## Called to mark `blk` as modified. It's assumed that blocks pulled from `alloc` are already marked modified.
+      ## Called to mark `blk` as modified. 
 
+  BPtr*[Bn] = object
+    ## A reference to a pointer loaded from the block manager.
+    ## When it goes out of scope, `finished` is called for the block.
+    ##
+    ## Warning:
+    ##   Until the newruntime is in working order, these pointers can not be copied safely.
+    p*: pointer
+    blk: Bn
+    bm: BlockMgr[Bn]
+
+proc `=destroy`[Bn](bp: var BPtr[Bn]) =
+  if bp.p != nil:
+    bp.bm.finished(bp.blk)
+
+proc `=sink`*[Bn](d: var BPtr[Bn]; s: BPtr[Bn]) = 
+  if d.p != nil:
+    d.bm.finished(d.blk)
+  d.p = s.p
+  d.blk = s.blk
+  d.bm = s.bm
+
+converter toPointer*[Bn](bp: BPtr[Bn]) : pointer = bp.p
+  ## Auto convert to pointers since these can't be copied yet.
+
+proc mkPtr*[Bn](bm: BlockMgr[Bn]; blk: Bn) : BPtr[Bn] = 
+  ## Loads a pointer from the block manager and returns it.
+  BPtr[Bn](p: bm.load(blk), blk: blk, bm: bm)
+
+type
   InMemoryBlockMgr[Bn] = ref object
     ## Example block manager where all of the blocks are in memory, and
     ## `Bn` is the "name" used to refer to block.
@@ -69,6 +100,7 @@ proc newInMemoryBlockMgr*[Bn](blockSize: Natural) : BlockMgr[Bn] =
     result = bm.blocks[int(blk)].p
 
   rv.modified = proc (blk: Bn) = discard
+  rv.finished = proc (blk: Bn) = discard
 
   return rv
 
@@ -136,8 +168,22 @@ proc insert[V](arr: var UncheckedArray[V]; arrLen, arrMaxLen: int; loc: int; val
     copyMem(addr(arr[loc+1]), addr(arr[loc]), sizeof(V) * numTrailing)
     arr[loc] = val
 
+proc delete[V](arr: var UncheckedArray[V]; arrLen, arrMaxLen: int; loc: int) = 
+  ## Deletes a value from the array, without changing the order of the remaining 
+  ## elements.
+  assert arrLen < arrMaxLen
+  assert loc >= 0 and loc < arrLen
+
+  let numTrailing = arrLen - loc - 1
+  if numTrailing > 0:
+    moveMem(addr(arr[loc]), addr(arr[loc+1]), sizeof(V) * numTrailing)
 
 type
+  PathPart[Bn] = tuple[nextIndex: int32; blk: Bn]
+    ## A path through the tree.  
+    ## Parameters:
+    ##   nextIndex:  node.keys[path[n-1].nextIndex] == path[n].blk
+
   BPlusTree*[Bn, K,V] = object
     ## A B+ tree.
     ##
@@ -166,6 +212,7 @@ type
     mgr: BlockMgr[Bn]
     root: Bn
     count: Natural
+    path: seq[PathPart[Bn]] # Temp used for lookups.
 
   DuplicateKey* = object of Defect
 
@@ -185,25 +232,29 @@ template goodBlk(b: untyped) : bool =
 proc asInternal[Bn,K,V](tr: BPlusTree[Bn,K,V]; p: pointer) : ptr InternalNode[K,Bn] = result = cast[ptr InternalNode[K,Bn]](p)
 proc asLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; p: pointer) : ptr LeafNode[K,V,Bn] = cast[ptr LeafNode[K,V,Bn]](p)
 
-proc loadInternal[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn) : ptr InternalNode[K,Bn] = 
-  asInternal(tr, tr.mgr.load(blk))
-    
-proc loadLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn) : ptr LeafNode[K,V,Bn] = 
-  asLeaf(tr, tr.mgr.load(blk))
+template loadInternal[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn) : ptr InternalNode[K,Bn] = 
+  var bp = mkPtr(tr.mgr, blk)
+  asInternal(tr, bp.p)
+
+template loadLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn) : ptr LeafNode[K,V,Bn] = 
+  var bp = mkPtr(tr.mgr, blk)
+  asLeaf(tr, bp.p)
 
 template switchBlock(tr: BPlusTree; blk: untyped; varName: untyped; internalAction, leafAction: untyped) = 
   ## Switches on the node kind of a block.  If it is an internal node, `varName` is bound to a `InternalNode`, and
   ## internalAction is executed.  Otherwise, `varName` is bound to a `LeafNode`, and leafAction is executed.
-  let p = cast[ptr NodeKind](tr.mgr.load(blk))
-  assert int(p[]) < 2 and int(p[]) >= 0 # Haha.  Yeah, this can happen if you screw up the pointers or don't zero memory when you said you did.
-  case p[]
-  of nkIntern:
-    let varName = asInternal(tr, p)
-    internalAction
+  block:
+    var bp = mkPtr(tr.mgr, blk)
+    let p = cast[ptr NodeKind](bp.p)
+    assert int(p[]) < 2 and int(p[]) >= 0 # Haha.  Yeah, this can happen if you screw up the pointers or don't zero memory when you said you did.
+    case p[]
+    of nkIntern:
+      let varName = asInternal(tr, p)
+      internalAction
 
-  of nkLeaf:
-    let varName = asLeaf(tr, p)
-    leafAction
+    of nkLeaf:
+      let varName = asLeaf(tr, p)
+      leafAction
 
 proc `$`*[Bn,K,V](tr: BPlusTree[Bn,K,V]) : string = 
   &"B+Tree(numItems={tr.count}, keysPerInternalNode={tr.numInternKeys}, keysPerLeaf={tr.numLeafKeys})"
@@ -217,12 +268,6 @@ proc initBPlusTree*[Bn,K,V](mgr: BlockMgr[Bn]) : BPlusTree[Bn,K,V] =
   initLeaf(result, loadLeaf[Bn,K,V](result, result.root))
   mgr.modified(result.root)
 
-type
-  PathPart[Bn] = tuple[nextIndex: int32; blk: Bn]
-    ## A path through the tree.  
-    ## Parameters:
-    ##   nextIndex:  node.keys[path[n-1].nextIndex] == path[n].blk
-
 proc findLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn; key: K; path: var seq[PathPart[Bn]]) : Bn = 
   ## Builds a path the start node down to the block that contains the leaf node for `key`.
   assert goodBlk(blk)
@@ -232,13 +277,13 @@ proc findLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn; key: K; path: var seq[Path
       if key <= node.keys[i].key:
         path[^1].nextIndex = int32(i)
         let nxtBlk = node.keys[i].child
-        switchBlock(tr, nxtBlk, cld):
+        switchBlock(tr, nxtBlk, _):
           return findLeaf(tr, nxtBlk, key, path)
         do:
           return nxtBlk
 
     if goodBlk(node.last):
-      switchBlock(tr, node.last, cld):
+      switchBlock(tr, node.last, _):
         return findLeaf(tr, node.last, key, path)
       do:
         return node.last
@@ -281,7 +326,7 @@ template full(tr: BPlusTree; n: ptr LeafNode) : untyped = int(n.numValues) == tr
 template full(tr: BPlusTree; n: ptr InternalNode) : untyped = int(n.numKeys) == tr.numInternKeys
   ## The node full of keys?
 
-proc addToInternal[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]; node: Bn; key: K; blk: Bn) = 
+proc addToInternal[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]]; node: Bn; key: K; blk: Bn) = 
   ## Add to the index so everything < `key` goes to `blk`.  Callers need to remember that
   ## after this function returns, `parents` may no longer be accurate.
   let lp = loadInternal(tr, node)
@@ -306,6 +351,7 @@ proc addToInternal[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]
 
     # Populate new node.
     copyMem(addr(nrp.keys[0]), addr(lp.keys[mid+1]), int(nrp.numKeys) * sizeof(nrp.keys[0]))
+    tr.mgr.modified(newNode)
 
     if len(parents) == 0:
       # Grow a new root.
@@ -313,6 +359,7 @@ proc addToInternal[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]
       let rp = loadInternal(tr, tr.root); initInternal(tr, rp)
       insertNoSplit(tr, rp, lp.keys[mid].key, node)
       rp.last = newNode
+      tr.mgr.modified(tr.root)
     else:
       let parent = parents.pop()
       let pp = loadInternal(tr, parent.blk)
@@ -324,10 +371,9 @@ proc addToInternal[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]
 
       addToInternal(tr, parents, parent.blk, lp.keys[mid].key, node)
 
-    tr.mgr.modified(newNode)
 
 
-proc addToLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]; leaf: Bn; key: K; val: V) = 
+proc addToLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]]; leaf: Bn; key: K; val: V) = 
   ## Does all of the work adding K/V to the leaf, including splitting the nodes if necessary.
   let lp = loadLeaf(tr, leaf)
 
@@ -354,6 +400,7 @@ proc addToLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]; le
     nrp.numValues = uint16(tr.numLeafKeys - mid)
     assert nrp.numValues > uint16(0)
     copyMem(addr(nrp.values[0]), addr(lp.values[mid]), sizeof(nrp.values[0]) * int(nrp.numValues))
+    tr.mgr.modified(newRightLeaf)
 
     if len(parents) == 0:
       # Special case, a new tree where the root was a leaf node.
@@ -364,6 +411,7 @@ proc addToLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]; le
       rp.numKeys = 1
       rp.keys[0] = (key: lp.values[lp.numValues-1].key, child: leaf)
       rp.last = newRightLeaf
+      tr.mgr.modified(tr.root)
     else:
       let parent = parents.pop()
       let pp = loadInternal(tr, parent.blk)
@@ -379,16 +427,42 @@ proc addToLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart]; le
         pp.keys[parent.nextIndex].key = lp.values[lp.numValues-1].key
         addToInternal(tr, parents, parent.blk, nrp.values[nrp.numValues-1].key, newRightLeaf)
 
+template atLeastHalfFull(tr: BPlusTree; n: ptr LeafNode) : bool = 
+  int(n.numValues) >= (tr.numLeafKeys div 2)
+
+template moreThanHalfFull(tr: BPlusTree; n: ptr LeafNode) : bool = 
+  int(n.numValues) > (tr.numLeafKeys div 2)
+
+proc deleteFromLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]]; leaf: Bn; key: K) = 
+  let lp = loadLeaf(tr, leaf)
+  let i = keyInsertPoint(tr, lp, key)
+
+  if i < int(lp.numValues) and key == lp.values[i].key:
+    tr.mgr.modified(leaf)
+    delete(lp.values, int(lp.numValues), tr.numLeafKeys, i)
+    dec(lp.numValues)
+    if not atLeastHalfFull(tr, lp):
+      if goodBlk(lp.next):
+        let neighbor = loadLeaf(tr, lp.next)
+
+        if moreThanHalfFull(tr, neighbor):
+          assert false, &"should pull value from {lp.next} into {leaf}"
+        else:
+          assert false, &"should merge values from {leaf} into {lp.next}"
+      else:
+        assert false, "not implemented, check left neighbor for merge or distribute options"
+
 proc leastLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]) : Bn = 
   ## Returns the leaf containing the lowest key.  
   result = tr.root
-  
-  while goodBlk(result):
+  var foundLeaf = false
+   
+  while not foundLeaf and goodBlk(result):
     switchBlock(tr, result, node):
       assert node.numKeys > uint16(0)
       result = node.keys[0].child
     do:
-      break
+      foundLeaf = true
 
 iterator pairs*[Bn,K,V](tr: BPlusTree[Bn,K,V]) : (K, V) = 
   ## Iterates all key value pairs in the tree in order.
@@ -407,37 +481,39 @@ proc add*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K; val: V) =
 
   # We should always start out with a leaf in an empty tree, so we should always be able to find something.
   assert goodBlk(leaf)
-  let lp = loadLeaf(tr, leaf)
   addToLeaf(tr, path, leaf, key, val)
   inc(tr.count)
 
-proc valueFor[Bn,K,V](tr: BPlusTree[Bn,K,V]; key: K) : (Bn, ptr V) =
-  ## If `key` is in the tree, return a pointer to its value.
+proc del*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K) = 
+  ## Deletes `key` from the tree.  Does nothing if the key is not found.
   var path: seq[PathPart[Bn]]
   let leaf = findLeaf(tr, tr.root, key, path); assert goodBlk(leaf)
+
+  deleteFromLeaf(tr, path, leaf, key)
+
+template withValPtr(tr: var BPlusTree; keyval: typed; varName: untyped; action: untyped) : untyped = 
+  setLen(tr.path, 0)
+  let leaf = findLeaf(tr, tr.root, keyval, tr.path); assert goodBlk(leaf)
   let lp = loadLeaf(tr, leaf)
-  let i = keyInsertPoint(tr, lp, key)
+  let i = keyInsertPoint(tr, lp, keyval)
 
-  if i < int(lp.numValues) and lp.values[i].key == key:
-    result = (leaf, addr(lp.values[i].value))
-  else:
-    result = (leaf, nil)
+  if i < int(lp.numValues) and lp.values[i].key == keyval:
+    let varName = (blk: leaf, val: addr(lp.values[i].value))
+    action
 
-proc updateValue*[Bn,K,V](tr: BPlusTree[Bn,K,V]; key: K; newVal: V) = 
+proc updateValue*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K; newVal: V) = 
   ## Updates the value associated with `key` to `newVal`. Does nothing if
   ## `K` isn't in the tree.
-  let (blk, vp) = valueFor(tr, key)
+  withValPtr(tr, key, res):
+    res.val[] = newVal
+    tr.mgr.modified(res.blk)
 
-  if vp != nil:
-    vp[] = newVal
-    tr.mgr.modified(blk)
+proc contains*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K) : bool = 
+  ## Containment test for `key`.
+  withValPtr(tr, key, res):
+    result = true
 
-proc contains*[Bn,K,V](tr: BPlusTree[Bn,K,V]; key: K) : bool = 
-    ## Containment test for `key`.
-    let (_, vp) = valueFor(tr, key)
-    vp != nil
-
-template withValue*(tr: BPlusTree; key: typed; varName, action: untyped) : untyped = 
+template withValue*(tr: var BPlusTree; key: typed; varName, action: untyped) : untyped = 
   ## If `key` is in the tree, `action` is executed with `varName` bound to a copy of the value.
   ## Otherwise, nothing happens.
   ##
@@ -446,11 +522,10 @@ template withValue*(tr: BPlusTree; key: typed; varName, action: untyped) : untyp
   ##    withValue(someTree, 98, val):
   ##      echo &"someTree[98] = {val}"
   ## ```
-  let (_, vp) = valueFor(tr, key)
-  if vp != nil:
-    let varName = vp[]
+  withValPtr(tr, key, res):
+    let varName = res.val[]
     action
-        
+
 proc gvnodedef[Bn,K,V](tr: BPlusTree[Bn,K,V]; blk: Bn) : string = 
   ## Returns a node definition for a graphviz file.
   ## Internal are oval, leaves are squares.

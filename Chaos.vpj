@@ -49,7 +49,7 @@
 				RunFromDir="%rw"
 				CaptureOutputWith="ProcessBuffer"
 				ClearProcessBuffer="1">
-				<Exec CmdLine="testy.exe"/>
+				<Exec CmdLine="./testy"/>
 			</Target>
 			<Target
 				Name="Build Docs"
