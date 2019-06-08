@@ -158,14 +158,15 @@ proc insert[V](arr: var UncheckedArray[V]; arrLen, arrMaxLen: int; loc: int; val
   assert arrLen < arrMaxLen
   assert loc >= 0 and loc <= arrLen
 
+  # a0 b1 c2 d3 e4 f5 f6 ^
   if loc == arrLen:
     arr[loc] = val
   else:
     # a b c d e f
     #     ^
     # arrLen=6, loc = 2
-    let numTrailing = arrLen - loc
-    copyMem(addr(arr[loc+1]), addr(arr[loc]), sizeof(V) * numTrailing)
+    let numTrailing = arrLen - loc 
+    moveMem(addr(arr[loc+1]), addr(arr[loc]), sizeof(V) * numTrailing)
     arr[loc] = val
 
 proc delete[V](arr: var UncheckedArray[V]; arrLen, arrMaxLen: int; loc: int) = 
@@ -398,6 +399,7 @@ proc addToLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]]
     #       ^ to right including mid
     lp.numValues = uint16(mid)
     nrp.numValues = uint16(tr.numLeafKeys - mid)
+
     assert nrp.numValues > uint16(0)
     copyMem(addr(nrp.values[0]), addr(lp.values[mid]), sizeof(nrp.values[0]) * int(nrp.numValues))
     tr.mgr.modified(newRightLeaf)
@@ -433,7 +435,8 @@ template atLeastHalfFull(tr: BPlusTree; n: ptr LeafNode) : bool =
 template moreThanHalfFull(tr: BPlusTree; n: ptr LeafNode) : bool = 
   int(n.numValues) > (tr.numLeafKeys div 2)
 
-proc deleteFromLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]]; leaf: Bn; key: K) = 
+proc graphviz*[Bn,K,V](tr: BPlusTree[Bn,K,V]; file: string; showLeafLinks = false) 
+proc deleteFromLeaf[Bn,K,V](tr: var BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]]; leaf: Bn; key: K) = 
   let lp = loadLeaf(tr, leaf)
   let i = keyInsertPoint(tr, lp, key)
 
@@ -441,12 +444,24 @@ proc deleteFromLeaf[Bn,K,V](tr: BPlusTree[Bn,K,V]; parents: var seq[PathPart[Bn]
     tr.mgr.modified(leaf)
     delete(lp.values, int(lp.numValues), tr.numLeafKeys, i)
     dec(lp.numValues)
+    dec(tr.count)
+
     if not atLeastHalfFull(tr, lp):
       if goodBlk(lp.next):
         let neighbor = loadLeaf(tr, lp.next)
 
         if moreThanHalfFull(tr, neighbor):
-          assert false, &"should pull value from {lp.next} into {leaf}"
+          # Pull least from neighbor to fill ourselves out to stay above minimum size.
+          tr.mgr.modified(lp.next)
+          lp.values[lp.numValues] = neighbor.values[0]
+          inc(lp.numValues)
+          delete(neighbor.values, int(neighbor.numValues), tr.numLeafKeys, 0)
+          dec(neighbor.numValues)
+          # Our test should be the key of the new lowest entry in the neighbor.
+          if len(parents) > 0:
+            let parent = loadInternal(tr, parents[^1].blk)
+            parent.keys[parents[^1].nextIndex].key = neighbor.values[0].key
+            tr.mgr.modified(parents[^1].blk)
         else:
           assert false, &"should merge values from {leaf} into {lp.next}"
       else:

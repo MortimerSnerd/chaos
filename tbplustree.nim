@@ -1,5 +1,5 @@
 import
-  system/ansi_c, bplustree, strformat
+  system/ansi_c, bplustree, intsets, random, sequtils, strformat
 
 type
   BlkInfo[Bn] = object
@@ -83,31 +83,70 @@ proc newTestBlockMgr*[Bn](blockSize: Natural) : BlockMgr[Bn] =
 
   return rv
 
+proc populate[Bn,int32,float32](tr: var BPlusTree[Bn,int32,float32]; count: Natural; hi: int32) : IntSet = 
+  ## Fills a tree with `count` random keys.  Returns seq of all keys added.
+  result = initIntSet()
+  var na = 0
+
+  while na < count:
+    let k = int32(rand(int(hi)))
+    if k notin result:
+      incl(result, k)
+      add(tr, k, float32(k) * 0.7f)
+      na += 1
+
+proc badInsert() = 
+  ## Sequence that triggered a bug with leaf inserts when they split.
+  var keys = @[int32(551579599), 336666328, 2000148485, 1113308261, 2026589088,
+               553166780, 1281276772, 1395580239, 1817045090, 65757242,
+               545445668, 284948476, 1167646666, 1167356782, 1978683550,
+               1216476975, 92647912, 389394498, 972002964, 511853933, 1548946595,
+               925924150, 1871467971, 692187584, 718417267, 1413146997, 294512493]
+  let bm = newTestBlockMgr[uint16](128)
+  var tr = initBPlusTree[uint16,int32,float32](bm)
+
+  try:
+    for k in keys:
+      add(tr, k, 30.0f)
+
+    assert int32(1113308261) in tr
+  finally:
+    bm.destroy()
+
+proc testCore() = 
+  let bm = newTestBlockMgr[uint16](128)
+  var tr = initBPlusTree[uint16, int32, float32](bm)
+
+  try:
+    var keys = populate(tr, 100, high(int32))
+
+    echo "testCore start = " & $tr
+    for k in keys:
+      assert int32(k) in tr, &"{k} notin tree"
+
+    var kseq = toSeq(items(keys))
+    while len(kseq) > 0:
+      let i = rand(len(kseq) - 1)
+      let k = int32(kseq[i])
+      echo &"deleting {k}"
+      del(kseq, i)
+      del(tr, k)
+      assert k notin tr, &"{k} not deleted"
+
+      for k in kseq:
+        echo &"checking {k}"
+        assert int32(k) in tr
+
+    graphviz(tr, "test.dot", false)
+    echo "testCore finish = " & $tr
+  except:
+    graphviz(tr, "problem.dot", false)
+    raise
+  finally:
+    bm.destroy()
+
 proc test*() = 
   echo "Testy"
-  var tr = initBPlusTree[uint16, int32, float32](newTestBlockMgr[uint16](128))
 
-  echo "BAT"
-  for i in 1..300:
-  #for i in countdown(300, 1):
-    tr.add(int32(i), float32(i) * 7)
-
-  tr.updateValue(int32(299), 34544.0f)
-
-  assert int32(55) in tr
-
-  for k, v in pairs(tr):
-    echo &"k={k} v={v}"
-
-  withValue(tr, int32(122), x):
-    echo "HAH " & $x
-
-  tr.withValue(int32(900), x):
-    echo "NOPE " & $x
-
-  del(tr, int32(122))
-  withValue(tr, int32(122), x):
-    echo "HAH AGAIN " & $x
-
-  #graphviz(tr, "test.dot", false)
-  echo "TREE = " & $tr
+  badInsert()
+  testCore()
