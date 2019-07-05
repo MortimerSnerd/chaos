@@ -12,16 +12,22 @@ task build, "Builds test harness program":
 
     --deadCodeElim:on
     --listFullPaths
-    --debuginfo
     --threads:on
     --threadAnalysis:on
     --define: debug
 
+    # Debuggery
+    --debuginfo:on
+    --debugger:native
+    --stackTrace:on
+    --lineTrace:on
     --warnings:on
     --hints:on
     --colors:off
     --nanChecks:on
     --infChecks:on
+    --define: dieOnAssert
+    
     #--overflowChecks:on  # This is expensive for what we're doing.
 
     switch("path", ".")

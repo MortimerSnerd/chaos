@@ -1,10 +1,24 @@
 # Test harness for all libraries.
 import 
-  tbplustree, strformat
+  os, random, tbplustree, times, strformat, strutils
 
 proc go() = 
   try:
-    tbplustree.test()
+    if paramCount() > 0:
+      let seed = parseBiggestInt(paramStr(1))
+      echo "SEED set to " & $seed
+      randomize(int64(seed))
+      tbplustree.test()
+    else:
+      for i in 1..100:
+        tbplustree.test()
+        let now = times.getTime()
+        let seed = convert(Seconds, Nanoseconds, now.toUnix) + now.nanosecond
+
+        echo ""
+        echo "SEED=" & $seed
+        randomize(seed)
+
   except:
     echo "EXCEPTION: " & getCurrentException().msg
     writeStackTrace()
