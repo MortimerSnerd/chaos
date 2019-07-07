@@ -427,6 +427,26 @@ proc modifyKeyToPreviousSibling[Bn,K,V](path: TreePath[Bn]; tr: var BPlusTree[Bn
     else:
       parent.keys[pinf.childIdx-1].key = newKey
 
+proc previousSibling[Bn,K,V](path: TreePath[Bn]; tr: var BPlusTree[Bn,K,V]) : Bn = 
+  ## For internal nodes, returns the previous sibliing under the same parent.
+  ## Returns Bn(0) if there is none.
+  if atRoot(path):
+    Bn(0)
+  else:
+    let pinf = path.parts[path.pos-1]
+    let parent = loadInternal(tr, pinf.blk)
+
+    if parent.numKeys == 0:
+      Bn(0)
+    elif pinf.childIdx == LastPathIndex:
+      parent.keys[parent.numKeys-1].child
+    else:
+      if pinf.childIdx > 0:
+        parent.keys[pinf.childIdx-1].child
+      else:
+        Bn(0)
+
+
 proc nextSiblingOfParent[Bn,K,V](path: TreePath[Bn]; tr: BPlusTree[Bn,K,V]) : Bn = 
   ## If there is a next sibling to the parent of the current node under the same grandparent, returns
   ## the block for it.
@@ -746,8 +766,45 @@ proc deleteFromInternal[Bn,K,V](tr: var BPlusTree[Bn,K,V]; path: var TreePath[Bn
               tr.mgr.free(node)
 
         else:
-          #TODO how much does lack of a borrowing from the left neighbor hurt us?
-          discard
+          assert atLastChildOfParent(path)
+          let parent = curParent(path, tr)
+          let nbblk = previousSibling(path, tr)
+
+          if goodBlk(nbblk) and parent.numKeys > uint16(0):
+            # ie, previous leaf is our sibling, and doesn't belong to a different parent.
+            let neighbor = loadInternal(tr, nbblk)
+
+            if atLeastHalfFull(tr, neighbor):
+              # We can try to borrow the last entry from our neighbor.
+              let (ok, borrowedEntKey) = greatestKey(tr, neighbor.last)
+              
+              if ok:
+                insert(np.keys, int(np.numKeys), tr.numInternKeys, 0, (key: borrowedEntKey, child: neighbor.last))
+                inc(np.numKeys)
+                tr.mgr.modified(parentBlk)
+                dec(neighbor.numKeys)
+                let neighborNewLastKey = neighbor.keys[neighbor.numKeys].key
+                neighbor.last = neighbor.keys[neighbor.numKeys].child
+                modifyKeyToPreviousSibling(path, tr, neighborNewLastKey)
+                tr.mgr.modified(nbblk)
+            else:
+              # Try to merge into our previous sibling, and remove this block.
+              let (ok, keyForNbLast) = greatestKey(tr, neighbor.last)
+              let (ok2, keyForLast) = greatestKey(tr, np.last)
+
+              if ok and ok2:
+                neighbor.keys[neighbor.numKeys] = (key: keyForNbLast, child: neighbor.last)
+                inc(neighbor.numKeys)
+                if np.numKeys > uint16(0):
+                  copyMem(addr(neighbor.keys[neighbor.numKeys]), addr(np.keys[0]), int(np.numKeys) * sizeof(np.keys[0]))
+                  neighbor.numKeys += np.numKeys
+
+                neighbor.last = np.last
+                tr.mgr.modified(parentBlk)
+                tr.mgr.modified(nbblk)
+                modifyKeyToPreviousSibling(path, tr, keyForLast)
+                deleteFromInternal(tr, path)
+                
 
 proc deleteLeafBlock[Bn,K,V](tr: var BPlusTree[Bn,K,V]; path: var TreePath[Bn]; lp: ptr LeafNode[K,V,Bn]) = 
   ## Deletes the leaf at the current position in the path, fixing up the leaf linked list. 
