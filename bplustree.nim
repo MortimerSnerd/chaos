@@ -233,8 +233,19 @@ type
     root: Bn
     count: Natural
     path: TreePath[Bn] # Temp used for lookups.
+    iterators: seq[ValueIterator[Bn,K,V]]
 
   DuplicateKey* = object of Defect
+
+  TreeIterator* = distinct int
+    ## Handle for an iterator that can move forward and backward through the
+    ## tree's values.
+
+  ValueIterator[Bn,K,V] = object
+    ## Iterator that can move forward and backward through the values of the tree.
+    curBlk: Bn
+    lp: ptr LeafNode[K,V,Bn]
+    index: int
 
 const
   LastPathIndex = high(int32)
@@ -928,6 +939,7 @@ iterator pairs*[Bn,K,V](tr: BPlusTree[Bn,K,V]) : (K, V) =
 
 proc add*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K; val: V) = 
   ## Adds a K,V association. No duplicates allowed.
+  doAssert len(tr.iterators) == 0, "Add while there are active iterators."
   init(tr.path)
   let leaf = findLeaf(tr, tr.root, key, tr.path)
 
@@ -938,6 +950,7 @@ proc add*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K; val: V) =
 
 proc del*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K) = 
   ## Deletes `key` from the tree.  Does nothing if the key is not found.
+  doAssert len(tr.iterators) == 0, "Delete while there are active iterators."
   init(tr.path)
   let leaf = findLeaf(tr, tr.root, key, tr.path); doAssert goodBlk(leaf)
 
@@ -952,6 +965,85 @@ template withValPtr(tr: var BPlusTree; keyval: typed; varName: untyped; action: 
   if i < int(lp.numValues) and lp.values[i].key == keyval:
     let varName = (blk: leaf, val: addr(lp.values[i].value))
     action
+
+proc setBlk[Bn,K,V](tr: var BPlusTree[Bn,K,V]; ti: TreeIterator; blk: Bn) = 
+  ## Should be used to update the `curBlk` field in ValueIterator.
+  let iter = addr(tr.iterators[int(ti)])
+
+  if goodBlk(iter.curBlk):
+    tr.mgr.finished(iter.curBlk)
+    iter.lp = nil
+    
+  iter.curBlk = blk
+  if goodBlk(blk):
+    iter.lp = cast[ptr LeafNode[K,V,Bn]](tr.mgr.load(blk)) # Don't use loadLeaf, because lifetime is not lexically scoped.
+    doAssert iter.lp.kind == nkLeaf
+
+proc leastValue*[Bn,K,V](tr: var BPlusTree[Bn,K,V]) : TreeIterator = 
+  ## Returns an iterator for the least value in th tree.  
+  ## Call `finished` on the iterator when done with it.
+  result = TreeIterator(len(tr.iterators))
+  add(tr.iterators, ValueIterator[Bn,K,V](index: 0))
+  setBlk(tr, result, leastLeaf(tr))
+
+proc finished*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; ti: TreeIterator) = 
+  ## Should be called when finished with an iterator.  There can be multiple
+  ## iteerators active, but they must have "finished" called in reverse order
+  ## that they were acquired.
+  assert int(ti) == (len(tr.iterators)-1), "Out of order iterator finish call."
+  setLen(tr.iterators, len(tr.iterators)-1)
+
+proc value*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; iter: TreeIterator) : (bool, V) = 
+  ## Dereferences the current value for the iterator.  Returns (false, _) if
+  ## there's no current value. 
+  let iv = addr(tr.iterators[int(iter)])
+
+  if iv.lp != nil and iv.index < int(iv.lp.numValues):
+    result = (true, iv.lp.values[iv.index].value)
+
+proc key*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; iter: TreeIterator) : (bool, K) = 
+  let iv = addr(tr.iterators[int(iter)])
+
+  if iv.lp != nil and iv.index < int(iv.lp.numValues):
+    result = (true, iv.lp.values[iv.index].key)
+
+#TODO valuePosition function that returns an iterator for the position of a key in the tree.  If the key is not in the tree, returns the position of the value that
+#      would come after the key.
+
+proc moveNext*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; ti: TreeIterator) : bool = 
+  ## Advances the iterator the next highest value.  Returns false if  there is no next value.
+  let iter = addr(tr.iterators[int(ti)])
+
+  if iter.lp != nil:
+    # Skip through a loop, leaves at the root can have 0 values.
+    result = true
+    inc(iter.index)
+    while iter.index >= int(iter.lp.numValues):
+      if not goodBlk(iter.lp.next):
+        # No more value blocks.
+        result = false
+        dec(iter.index)
+        break
+      else:
+        setBlk(tr, ti, iter.lp.next)
+        iter.index = 0
+
+proc movePrev*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; ti: TreeIterator) : bool = 
+  ## Advances the iterator the next lowest value.  Returns false if  there is no next value.
+  let iter = addr(tr.iterators[int(ti)])
+
+  if iter.lp != nil:
+    # Skip through a loop, leaves at the root can have 0 values.
+    result = true
+    dec(iter.index)
+    while iter.index < 0:
+      if not goodBlk(iter.lp.prev):
+        # No more value blocks.
+        result = false
+        break
+      else:
+        setBlk(tr, ti, iter.lp.prev)
+        iter.index = int(iter.lp.numValues) - 1
 
 proc updateValue*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K; newVal: V) = 
   ## Updates the value associated with `key` to `newVal`. Does nothing if

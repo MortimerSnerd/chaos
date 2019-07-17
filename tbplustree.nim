@@ -134,6 +134,29 @@ proc badInsert() =
   finally:
     bm.destroy()
 
+proc testIteration[Bn,K,V](tr: var BPlusTree[Bn,K,V]; keys: IntSet) = 
+  ## Make sure forward and backward iteration of the values works.
+  var numFound = 0
+  var iter = leastValue(tr)
+
+  while (let (ok, k) = key(tr, iter); ok):
+    inc(numFound)
+    assert int(k) in keys
+    if not moveNext(tr, iter):
+      break
+
+  assert numFound == len(tr)
+  numFound = 0
+
+  while (let (ok, k) = key(tr, iter); ok):
+    inc(numFound)
+    assert int(k) in keys
+    if not movePrev(tr, iter):
+      break
+
+  assert numFound == len(tr), &"{numFound} vs {len(tr)}"
+  finished(tr, iter)
+
 proc testCore(numItems: int; blkSize: int) = 
   let bm = newTestBlockMgr[uint16](blkSize)
   var tr = initBPlusTree[uint16, int32, float32](bm)
@@ -142,6 +165,7 @@ proc testCore(numItems: int; blkSize: int) =
     var keys = populate(tr, numItems, high(int32))
 
     echo &"testCore {numItems} start = {tr}"
+    testIteration(tr, keys)
     graphviz(tr, "full.dot", false)
     for k in keys:
       assert int32(k) in tr, &"{k} notin tree"
