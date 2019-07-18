@@ -170,6 +170,15 @@ proc testCore(numItems: int; blkSize: int) =
     for k in keys:
       assert int32(k) in tr, &"{k} notin tree"
 
+      # Exercise the iterators returned by valuePosition.
+      let iter = valuePosition(tr, int32(k))
+      let (ok1, k1) = key(tr, iter)
+      assert ok1 and k1 == int32(k), &"wrong iteration position for {k}, vs {k1}"
+      if moveNext(tr, iter):
+        let (ok2, k2) = key(tr, iter)
+        assert ok2 and k2 > k1, "moveNext from {k} not >, k2={k2}"
+      finished(tr, iter)
+
     var kseq = toSeq(items(keys))
     while len(kseq) > 0:
       let i = rand(len(kseq) - 1)
@@ -255,6 +264,78 @@ proc ramps(setpoints: openarray[int]; blkSize: Positive) =
   echo &"\tdone {tr}"
     
 
+# One implementation of duplicates for a integer key.
+# Maintains a separate field in the key to keep the keys
+# unique for the B+ tree.
+type
+  UKey[K] = object
+    key: K
+    unid: int32  
+
+proc `<=`[K](a, b: UKey[K]) : bool = 
+  if a.key < b.key:
+    true
+  elif a.key == b.key:
+    a.unid <= b.unid
+  else:
+    false
+
+proc addDup[Bn,K,V](tr: var BPlusTree[Bn,UKey[K],V]; key: K, val: V) = 
+  # There may already be a key == `key` in the tree, so 
+  # we look for `key+1` in the tree.  This allows us to look at
+  # previous value, and quickly get the largest `unid` for key `key`
+  # so we can use that + 1 to make this insertion unique.
+  let iter = valuePosition(tr, UKey[K](key: key+1, unid: 0))
+
+  if movePrev(tr, iter):
+    let (ok, prevKey) = key(tr, iter)
+
+    if ok and prevKey.key == key:
+      # This is a duplicate, so make it unique by adding 1 to unid
+      finished(tr, iter)
+      add(tr, UKey[K](key: key, unid: prevKey.unid + 1), val)
+    else:
+      # No duplicate, add normally.
+      finished(tr, iter)
+      add(tr, UKey[K](key: key, unid: 0), val)
+  else:
+    # Nothing before us, so no duplicate.
+    finished(tr, iter)
+    add(tr, UKey[K](key: key, unid: 0), val)
+
+proc delDup[Bn,K,V](tr: var BPlusTree[Bn,UKey[K],V]; key: K) = 
+  ## With duplicates, we always search for the key with the lowest unid and 
+  ## whack that one.
+  let iter = valuePosition(tr, UKey[K](key: key, unid: 0))
+  let (ok, k) = key(tr, iter)
+
+  finished(tr, iter)
+  if k.key == key:
+    del(tr, k)
+
+
+proc testDupImpl(blkSize: int) = 
+  let bm = newTestBlockMgr[uint16](blkSize)
+  var tr = initBPlusTree[uint16, UKey[int], float32](bm)
+  const maxVal = 100
+  var occurs = newSeq[int](maxVal+1)
+
+  echo &"Testing dup impl blkSize={blkSize}"
+  for i in 0..3000:
+    let rv = rand(maxVal)
+    inc(occurs[rv])
+    addDup(tr, rv, 12.0)
+
+  var p = 0
+
+  while p <= maxVal:
+    while occurs[p] > 0:
+      dec(occurs[p])
+      delDup(tr, p)
+    inc(p)
+
+  assert len(tr) == 0
+
 proc test*() = 
   echo "Testy"
 
@@ -263,6 +344,7 @@ proc test*() =
   const blkSize = 128
   badInsert()
   testCore(100, blkSize) # depth = 2
+  testDupImpl(blkSize*2)
   testCore(230, blkSize) # depth = 3
   testCore(230*15, blkSize) # depth = 4
   ramps([300, 200, 400, 100], blkSize)

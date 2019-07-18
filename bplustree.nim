@@ -1010,6 +1010,25 @@ proc key*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; iter: TreeIterator) : (bool, K) =
 #TODO valuePosition function that returns an iterator for the position of a key in the tree.  If the key is not in the tree, returns the position of the value that
 #      would come after the key.
 
+proc valuePosition*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; key: K) : TreeIterator = 
+  ## Returns an iterator for the leaf position of 'key` in the tree. 
+  ## If `key` is not in the tree, returns the position that would come after
+  ## `key`.
+  init(tr.path)
+  var leaf = findLeaf(tr, tr.root, key, tr.path);  assert goodBlk(leaf)
+  let lp = loadLeaf(tr, leaf)
+  var idx = keyInsertPoint(tr, lp, key)
+
+  if idx == int(lp.numValues) and goodBlk(lp.next):
+    # Special case, a key of `key` would be added to this leaf, but technically, the 
+    # next greatest value we want to point to would be the first key in the next leaf.
+    idx = 0
+    leaf = lp.next
+
+  result = TreeIterator(len(tr.iterators))
+  add(tr.iterators, ValueIterator[Bn,K,V](index: idx))
+  setBlk(tr, result, leaf)
+
 proc moveNext*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; ti: TreeIterator) : bool = 
   ## Advances the iterator the next highest value.  Returns false if  there is no next value.
   let iter = addr(tr.iterators[int(ti)])
@@ -1040,6 +1059,7 @@ proc movePrev*[Bn,K,V](tr: var BPlusTree[Bn,K,V]; ti: TreeIterator) : bool =
       if not goodBlk(iter.lp.prev):
         # No more value blocks.
         result = false
+        inc(iter.index)
         break
       else:
         setBlk(tr, ti, iter.lp.prev)
